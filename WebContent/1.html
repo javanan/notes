@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>mysql/Java服务端对emoji的支持</title>
+</head>
+<body>
+前言：
+
+最近开发的iOS项目因为需要用户文本的存储，自然就遇到了emoji等表情符号如何被mysql DB支持的问题。困扰了数日，在就要绝望放弃的边缘，终于完成了转换和迁移。在此特别分析和整理，方便更多人。
+
+ 
+
+问题描述：
+
+如果UTF8字符集且是Java服务器的话，当存储含有emoji表情时，会抛出类似如下异常：
+
+java.sql.SQLException: Incorrect string value: '\xF0\x9F\x92\x94' for column 'name' at row 1  
+    at com.mysql.jdbc.SQLError.createSQLException(SQLError.java:1073)  
+    at com.mysql.jdbc.MysqlIO.checkErrorPacket(MysqlIO.java:3593)  
+    at com.mysql.jdbc.MysqlIO.checkErrorPacket(MysqlIO.java:3525)  
+    at com.mysql.jdbc.MysqlIO.sendCommand(MysqlIO.java:1986)  
+    at com.mysql.jdbc.MysqlIO.sqlQueryDirect(MysqlIO.java:2140)  
+    at com.mysql.jdbc.ConnectionImpl.execSQL(ConnectionImpl.java:2620)  
+    at com.mysql.jdbc.StatementImpl.executeUpdate(StatementImpl.java:1662)  
+    at com.mysql.jdbc.StatementImpl.executeUpdate(StatementImpl.java:1581)
+这就是字符集不支持的异常。因为UTF-8编码有可能是两个、三个、四个字节，其中Emoji表情是4个字节，而Mysql的utf8编码最多3个字节，所以导致了数据插不进去。
+
+升级前需要考虑的问题：
+
+如果你的项目要进行移动产品的用户文本的存储，将你的DB字符集从UTF8/GBK等传统字符集升级到utf8mb4将是势在必行。你可以通过应用层面转换emoji等特殊字符，以达到原DB的兼容，我认为可行，但是你可能走了弯路。
+
+utf8mb4作为utf8的super set，完全向下兼容，所以不用担心字符的兼容性问题。切换中需要顾虑的主要影响是mysql需要重新启动（虽然mysql官方文档说可以动态修改配置，但是经过数次测试，还是需要重启才可生效），对于业务可用率的影响是需要考虑的大问题，这里就暂时不展开讨论了。
+
+升级步骤：
+
+1.utf8mb4的最低mysql版本支持版本为5.5.3+，若不是，请升级到较新版本。
+
+mysql版本查看命令请看：查看mysql版本的四种方法；mysql安装步骤请看：Linux中升级Mysql到Mysql最新版本的方法
+2.修改database、table和column字符集。参考以下语句：
+ALTER DATABASE database_name CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+ALTER TABLE table_name CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+ALTER TABLE table_name CHANGE column_name VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+3.修改mysql配置文件my.cnf（windows为my.ini）
+
+my.cnf一般在etc/mysql/my.cnf位置。找到后请在以下三部分里添加如下内容：
+
+[client]
+default-character-set = utf8mb4
+
+[mysql]
+default-character-set = utf8mb4
+
+[mysqld]
+character-set-client-handshake = FALSE
+character-set-server = utf8mb4
+collation-server = utf8mb4_unicode_ci
+init_connect='SET NAMES utf8mb4'
+
+4.重启 MySQL Server、检查字符集
+
+1.）重启命令参考：/etc/init.d/mysql restart
+
+2.）输入命令：mysql，进入mysql命令行（如果提示没权限，可以尝试输入mysql -uroot -p你的密码）
+
+3.）在mysql命令行中输入：SHOW VARIABLES WHERE Variable_name LIKE 'character_set_%' OR Variable_name LIKE 'collation%';
+
+检查是否如下：
+
++--------------------------+--------------------+
+| Variable_name            | Value              |
++--------------------------+--------------------+
+| character_set_client    | utf8mb4            |
+| character_set_connection | utf8mb4            |
+| character_set_database  | utf8mb4            |
+| character_set_filesystem | binary            |
+| character_set_results    | utf8mb4            |
+| character_set_server    | utf8mb4            |
+| character_set_system    | utf8              |
+| collation_connection    | utf8mb4_unicode_ci |
+| collation_database      | utf8mb4_unicode_ci |
+| collation_server        | utf8mb4_unicode_ci |
++--------------------------+--------------------+
+rows in set (0.00 sec)
+
+特别说明下：collation_connection/collation_database/collation_server如果是utf8mb4_general_ci，没有关系。但必须保证character_set_client/character_set_connection/character_set_database/character_set_results/character_set_server为utf8mb4。关于这些字符集配置是干什么用的，有什么区别，请参考：深入Mysql字符集设置
+
+5.如果你用的是java服务器，升级或确保你的mysql connector版本高于5.1.13，否则仍然无法使用utf8mb4
+这是mysql官方release note，大家可以查看说明，并下载最新的mysql connector for java的jar包。
+这里为大家提供一个：mysql-connector-java-5.1.31-bin.jar
+同时记得修改pom配置哦~
+
+6.检查你服务端的db配置文件：
+
+ 
+
+jdbc.driverClassName=com.mysql.jdbc.Driver
+jdbc.url=jdbc:mysql://localhost:3306/database?useUnicode=true&characterEncoding=utf8&autoReconnect=true&rewriteBatchedStatements=TRUE
+jdbc.username=root
+jdbc.password=password
+
+ 
+
+特别说明其中的jdbc.url配置：如果你已经升级好了mysql-connector，其中的characterEncoding=utf8可以被自动被识别为utf8mb4（当然也兼容原来的utf8），而autoReconnect配置我强烈建议配上，我之前就是忽略了这个属性，导致因为缓存缘故，没有读取到DB最新配置，导致一直无法使用utf8mb4字符集，多么痛的领悟！！
+
+ 
+
+推荐阅读
+
+以下两篇文章也推荐大家参考，这两位作者也都非常仔细的整理了相关思路和文档，同时欢迎关注我的博客http://www.ilikewhite.com：
+MySQL乱码问题以及utf8mb4字符集
+Emoji表情符号兼容方案
+
+emoji mysql java utf8mb4
+链接 更多
+分享 新浪微博微信TwitterFacebook人人网豆瓣
+2 推荐   收藏
+你可能感兴趣的文章
+
+mysql存储emoji 1 收藏，88 浏览
+让你的网站支持Emoji 2 收藏，203 浏览
+php+mysql 解决emoji表情符号问题 221 浏览
+讨论区
+
+ 
+jdbc.url=jdbc:mysql://localhost:3306/database？useUnicode=true&characterEncoding=utf8&autoReconnect=true&rewriteBatchedStatements=TRUE
+
+这里有一个坑，费了我好长时间。connector版本大于5.1.13的不能加characterEncoding=utf8，我的试验结果是5.1.13加不加都行。
+看了这篇文章才发现的： http://info.michael-simons.eu/2013/01/21/java-mysql-and-multi-byte-utf-8-support/
+
+#1 lymee · 2014年11月26日 · 回复
+
+ 
+回复 lymee：
+大于5.1.13的不能加characterEncoding=utf8吗？我用的是5.1.31版本
+
+#2 Ilikewhite · 2014年11月26日 · 回复
+
+ 
+我试验的结果是的，大于5.1.13的版本去掉characterEncoding=utf8就ok，不去掉都是这种错：java.sql.SQLException: Incorrect string value: '\xF0\x9F\x92\x94'
+
+#3 lymee · 2014年11月26日 · 回复
+
+ 
+你有没有刷新过mysql配置？去掉之后emoji就能保存了吗？
+
+#4 Ilikewhite · 2014年11月26日 · 回复
+
+ 
+为何如下配置不起效呢？
+
+For advice on how to change settings please see http://dev.mysql.com/doc/refman/5.6/en/server-configuration-defaults.html *** DO NOT EDIT THIS FILE. It's a template which will be copied to the *** default location during install, and will be replaced if you *** upgrade to a newer version of MySQL.
+[client]
+
+password = your_password
+port = 3306
+socket = /tmp/mysql.sock
+default-character-set=utf8
+
+Here follows entries for some specific programs The MariaDB server
+[mysqld]
+port = 3306
+socket = /tmp/mysql.sock
+character-set-server=utf8
+character-set-filesystem = utf8
+
+Remove leading # and set to the amount of RAM for the most important data cache in MySQL. Start at 70% of total RAM for dedicated server, else 10%. innodb_buffer_pool_size = 128M Remove leading # to turn on a very important data integrity option: logging changes to the binary log between backups. log_bin These are commonly set, remove the # and set as required. basedir = ..... datadir = ..... port = ..... server_id = ..... Remove leading # to set options mainly useful for reporting servers. The server defaults are faster for transactions and fast SELECTs. Adjust sizes as needed, experiment to find the optimal values. join_buffer_size = 128M sort_buffer_size = 2M read_rnd_buffer_size = 2M
+sql_mode=NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES
+
+#5 hengchengfei · 3月1日 · 回复
+
+ 
+有个坑，我用navicat连接的数据库，按楼主改完配置重启后，在Navicat查询的时候总是有几个属性没有改过来，百思不得其姐，后来登陆到mysql的服务器，在服务器上用命令行登陆mysql查询发现都已经改过来了。
+
+#6 loverswordsman · 8月18日 · 回复
+
+请先 登录 后评论
+</body>
+</html>
